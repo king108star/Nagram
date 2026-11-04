@@ -2,7 +2,7 @@
 
 适用于 [king108star/Nagram](https://github.com/king108star/Nagram) 的 main 分支。源码中普通账户和 Premium 账户的登录上限均已设为 20，账户数量边界测试也已更新；内部 Java/C++ 槽位保留 128。
 
-仓库已添加 `.github/workflows/self-build-20.yml`，在 Actions 中显示为 **Self Build 20 Accounts**，只需手动触发。它检查源码的 20 个账户上限，在 Actions 的临时工作目录里按上游 README 处理原有签名检查，生成你自己的签名 APK，并将文件保存为 Actions Artifacts。无需在 1 核 1 GB 的 VPS 上编译 Android 项目；VPS 只用于下文生成签名密钥和配置文件。
+仓库已添加 `.github/workflows/self-build-20.yml`，在 Actions 中显示为 **Self Build 20 Accounts**，只需手动触发。它检查源码的 20 个账户上限，在 Actions 的临时工作目录里按上游 README 处理原有签名检查，生成你自己的签名 APK，并将文件保存为 Actions Artifacts。Android 项目的编译全部在 GitHub Actions 上进行。下文的 VPS 只用于生成一次签名密钥和配置文件；有 Java 的电脑也可以完成这一步。
 
 ## 手机资源
 
@@ -11,6 +11,10 @@
 ## 1. 获取自己的 Telegram API 信息
 
 在浏览器打开 my.telegram.org，登录自己的 Telegram 账户，进入 API development tools，创建应用。保存 api_id 和 api_hash。平台可以选 Android。不要把 api_hash 发到聊天或提交进公开仓库。
+
+如果暂时申请失败，当前上游 `TMessagesProj/build.gradle` 已包含 API 默认值。工作流提供 `Use the Telegram API settings already included in Nagram source` 可选开关：不填写个人 API 字段且勾选该开关时，Gradle 会使用源码里的现有默认值。开关默认关闭，需要自己明确选择。默认凭据的有效性和实际登录情况尚未验证，不能据此保证 APK 可用。
+
+[Telegram API 条款第 2.1 条](https://core.telegram.org/api/terms#2-transparency)要求为自己的应用取得自己的 API ID。编译配置存在默认值，并不代表获得了上游凭据持有者的授权或 Telegram 的许可；长期使用自己的 API 凭据更合适。自己的 API ID 和 Hash 必须一起填写，不能只填其中一个。
 
 ## 2. 在 Debian VPS 上生成签名密钥
 
@@ -39,7 +43,7 @@ keytool -genkeypair -keystore release.keystore -storetype JKS \
 nano local.properties
 ```
 
-填写以下五行，用你自己的值替换占位文字：
+使用自己的 API 时，填写以下五行，用你自己的值替换占位文字：
 
 ```properties
 KEYSTORE_PASS=刚才设置的密钥库密码
@@ -48,6 +52,16 @@ ALIAS_PASS=同一个密码
 TELEGRAM_APP_ID=你申请到的api_id
 TELEGRAM_APP_HASH=你申请到的api_hash
 ```
+
+暂时尝试源码现有 API 配置时，文件只保留前三行：
+
+```properties
+KEYSTORE_PASS=刚才设置的密钥库密码
+ALIAS_NAME=nagram20
+ALIAS_PASS=同一个密码
+```
+
+删除 `TELEGRAM_APP_ID` 和 `TELEGRAM_APP_HASH` 两行，不要填示例数字、`abcdefg` 或占位文字。该方式仍需在启动工作流时勾选上文的开关。以后取得自己的 API 凭据，再补回两行并更新 `LOCAL_PROPERTIES` Secret，开关保持关闭即可。
 
 Ctrl+O 保存，回车确认文件名，Ctrl+X 退出。然后执行：
 
@@ -83,6 +97,8 @@ cat LOCAL_PROPERTIES.txt
 
 打开 [仓库的 Actions](https://github.com/king108star/Nagram/actions)。如果提示 Fork 的工作流尚未启用，按页面提示启用。选择 Self Build 20 Accounts → Run workflow，选择 main 分支并运行。源码和工作流已提交，无需再上传附件或修改账户数量。
 
+如果 `LOCAL_PROPERTIES` 只有签名的三项，启动时勾选 **Use the Telegram API settings already included in Nagram source**；否则配置检查会停止并提示补齐自己的 API 凭据。
+
 首次需要编译原生库，通常比后续运行慢；不要仅因等待时间长就取消。原生库之后会复用缓存。这里没有承诺具体完成时间。
 
 运行成功后，在同一次运行页面的 Artifacts 下载 Nagram-self-20-APKs，解压获得 APK。大多数现代 Android 手机使用名称包含 arm64-v8a 的 APK；32 位设备使用 armeabi-v7a。
@@ -91,7 +107,7 @@ cat LOCAL_PROPERTIES.txt
 
 ## 验证范围
 
-工作流内嵌 Python 脚本和 Bash 脚本已通过语法检查；构建步骤依据当前上游 Gradle 配置和 release.yml 整理。工作流会先运行四个账户数量测试，再生成 APK。尚未配置你的 Secrets、执行完整 Actions 构建或在手机上测试；脚本语法通过不代表 APK 已编译成功。
+工作流内嵌 Python 脚本和 Bash 脚本已通过语法检查，API 可选开关的配置校验也已通过本地模拟检查；构建步骤依据当前上游 Gradle 配置和 release.yml 整理。工作流会先运行四个账户数量测试，再生成 APK。尚未执行完整 Actions 构建或在手机上测试；脚本检查通过不代表 APK 已编译成功或默认 API 凭据可登录。
 
 源码与文档来源：
 
