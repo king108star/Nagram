@@ -177,7 +177,7 @@ android {
     }
 
     defaultConfig {
-        minSdkVersion 23
+        minSdkVersion 24
         //noinspection ExpiredTargetSdkVersion,OldTargetApi
         targetSdkVersion 36
 
