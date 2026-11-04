@@ -19,7 +19,8 @@ import java.lang.reflect.Field;
 import java.util.concurrent.CopyOnWriteArraySet;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(application = android.app.Application.class)
+// API 36 requires Java 21 in Robolectric; CI uses Java 17.
+@Config(sdk = 35, application = android.app.Application.class)
 public class UserConfigAccountLimitTest {
 
     private Context context;
