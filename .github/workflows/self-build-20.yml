@@ -1,0 +1,211 @@
+name: Self Build 20 Accounts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Check build configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required secrets
+        env:
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          for name in ('LOCAL_PROPERTIES', 'KEYSTORE_BASE64'):
+              value = os.environ.get(name, '').strip()
+              if not value:
+                  raise SystemExit(f'Add the Actions secret: {name}')
+              try:
+                  decoded = base64.b64decode(value, validate=True)
+              except Exception:
+                  raise SystemExit(f'{name} must contain single-line base64')
+              if not decoded:
+                  raise SystemExit(f'{name} is empty')
+          text = base64.b64decode(os.environ['LOCAL_PROPERTIES'].strip()).decode('utf-8')
+          properties = dict(line.split('=', 1) for line in text.splitlines() if '=' in line and not line.lstrip().startswith('#'))
+          properties = {key.strip(): value.strip() for key, value in properties.items()}
+          for key in ('KEYSTORE_PASS', 'ALIAS_NAME', 'ALIAS_PASS', 'TELEGRAM_APP_ID', 'TELEGRAM_APP_HASH'):
+              if not properties.get(key):
+                  raise SystemExit(f'LOCAL_PROPERTIES is missing: {key}')
+          print('Build configuration is present.')
+          PY
+
+  native:
+    name: Native build (${{ matrix.abi }})
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [armeabi-v7a, arm64-v8a]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Prepare native code for own signing key
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path('TMessagesProj/jni/jni.c')
+          text = path.read_text()
+          # The upstream README requires removing its signing check for self builds.
+          pattern = r'\s*if\s*\(verifySign\(env\)\s*!=\s*JNI_OK\)\s*\{\s*return\s+JNI_ERR;\s*\}'
+          text, count = re.subn(pattern, '\n    /* Self build: APK uses the owner\'s signing key. */\n', text)
+          if count != 1:
+              raise SystemExit('Expected upstream signature check not found; review the current jni.c.')
+          path.write_text(text)
+          PY
+          sed -i 's/\/\///g' settings.gradle
+
+      - name: Native cache
+        id: native-cache
+        uses: actions/cache@v6
+        with:
+          path: TMessagesProj/src/main/libs
+          key: self20-native-v1-${{ matrix.abi }}-${{ hashFiles('TMessagesProj/jni/**', 'bin/**', 'build.gradle', 'TMessagesProj/build.gradle', 'gradle/wrapper/**', '.gitmodules') }}
+
+      - name: Initialize submodules
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        run: git submodule update --init --recursive
+
+      - name: Set up Java 17
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android build tools
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        run: |
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          printf 'sdk.dir=%s\nndk.dir=%s/ndk/27.2.12479018\n' "$ANDROID_HOME" "$ANDROID_HOME" > local.properties
+
+      - name: Compile native libraries
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        env:
+          NATIVE_TARGET: ${{ matrix.abi }}
+        run: |
+          ./run init libs
+          ./run libs native
+
+      - name: Check native output
+        env:
+          NATIVE_TARGET: ${{ matrix.abi }}
+        run: |
+          test -n "$(find "TMessagesProj/src/main/libs/$NATIVE_TARGET" -name 'libtmessages*.so' -size +0c -print -quit)"
+
+      - name: Upload native libraries
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.abi }}
+          path: TMessagesProj/src/main/libs
+          if-no-files-found: error
+          retention-days: 3
+
+  build:
+    name: Build APK
+    needs: native
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize submodules
+        run: |
+          sed -i 's/\/\///g' settings.gradle
+          git submodule update --init --recursive
+
+      - name: Verify 20-account source configuration
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path('TMessagesProj/src/main/java/org/telegram/messenger/UserConfig.java')
+          text = path.read_text()
+          for name in ('MAX_ACCOUNT_DEFAULT_COUNT', 'MAX_ACCOUNT_PREMIUM_COUNT'):
+              if not re.search(r'\b' + name + r'\s*=\s*20\s*;', text):
+                  raise SystemExit(f'{name} must be 20 in UserConfig.java.')
+          if not re.search(r'\bMAX_ACCOUNT_COUNT\s*=\s*128\s*;', text):
+              raise SystemExit('Keep internal account slots at 128.')
+          if 'ExtendedHelper.getInstance().hasExtended()' in text:
+              raise SystemExit('Remove the extra account-slot bypass from requestAccountSlot().')
+          print('Login limit: 20. Internal account slots remain 128.')
+          PY
+
+      - name: Download native libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: TMessagesProj/src/main/libs
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android build tools
+        run: |
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          printf 'sdk.dir=%s\nndk.dir=%s/ndk/27.2.12479018\n' "$ANDROID_HOME" "$ANDROID_HOME" > local.properties
+
+      - name: Restore own signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          umask 077
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+          Path('TMessagesProj/release.keystore').write_bytes(base64.b64decode(os.environ['KEYSTORE_BASE64'].strip(), validate=True))
+          PY
+
+      - name: Set build timestamp
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import time
+          path = Path('gradle.properties')
+          path.write_text(path.read_text().replace('2000000000000', str(time.time_ns() // 1_000_000)))
+          PY
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Compile signed release APKs
+        env:
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+        run: |
+          ./gradlew TMessagesProj:testReleaseUnitTest --tests org.telegram.messenger.UserConfigAccountLimitTest --build-cache --no-configuration-cache
+          ./gradlew TMessagesProj:assembleRelease --build-cache --no-configuration-cache
+
+      - name: Upload APKs for download
+        uses: actions/upload-artifact@v7
+        with:
+          name: Nagram-self-20-APKs
+          path: TMessagesProj/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 14
