@@ -2,6 +2,11 @@ name: Self Build 20 Accounts
 
 on:
   workflow_dispatch:
+    inputs:
+      use_source_api:
+        description: Use the Telegram API settings already included in Nagram source
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -15,6 +20,7 @@ jobs:
         env:
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          USE_SOURCE_API: ${{ inputs.use_source_api }}
         run: |
           python3 - <<'PY'
           import base64
@@ -32,9 +38,17 @@ jobs:
           text = base64.b64decode(os.environ['LOCAL_PROPERTIES'].strip()).decode('utf-8')
           properties = dict(line.split('=', 1) for line in text.splitlines() if '=' in line and not line.lstrip().startswith('#'))
           properties = {key.strip(): value.strip() for key, value in properties.items()}
-          for key in ('KEYSTORE_PASS', 'ALIAS_NAME', 'ALIAS_PASS', 'TELEGRAM_APP_ID', 'TELEGRAM_APP_HASH'):
+          for key in ('KEYSTORE_PASS', 'ALIAS_NAME', 'ALIAS_PASS'):
               if not properties.get(key):
                   raise SystemExit(f'LOCAL_PROPERTIES is missing: {key}')
+          app_id = properties.get('TELEGRAM_APP_ID', '')
+          app_hash = properties.get('TELEGRAM_APP_HASH', '')
+          if bool(app_id) != bool(app_hash):
+              raise SystemExit('Provide both TELEGRAM_APP_ID and TELEGRAM_APP_HASH, or omit both.')
+          if not app_id:
+              if os.environ.get('USE_SOURCE_API', '').lower() != 'true':
+                  raise SystemExit('Add your Telegram API credentials, or explicitly select the source API option when starting this workflow.')
+              print('Using the API settings already included in Nagram source. APK login has not been verified.')
           print('Build configuration is present.')
           PY
 
