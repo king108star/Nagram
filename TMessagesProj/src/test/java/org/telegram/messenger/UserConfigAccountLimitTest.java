@@ -36,19 +36,13 @@ public class UserConfigAccountLimitTest {
         resetState();
     }
 
-    // NOTE: requestAccountSlot() falls back to ExtendedHelper.getInstance().hasExtended()
-    // once the account count reaches getMaxAccountCount(). That call chain reaches
-    // MessagesController -> ConnectionsManager.native_isTestBackend(), a JNI method with
-    // no Robolectric shadow, so it throws UnsatisfiedLinkError under a plain JVM unit test.
-    // These tests therefore only cover slot assignment strictly below the cap; the
-    // beyond-cap / extended-unlock branch needs an instrumented (on-device) test instead.
 
     @Test
     public void slotIsAssignedBelowDefaultLimit() {
         activateAccounts(UserConfig.MAX_ACCOUNT_DEFAULT_COUNT - 1, false);
 
         assertEquals(128, UserConfig.MAX_ACCOUNT_COUNT);
-        assertEquals(8, UserConfig.getMaxAccountCount());
+        assertEquals(20, UserConfig.getMaxAccountCount());
         assertEquals(UserConfig.MAX_ACCOUNT_DEFAULT_COUNT - 1, UserConfig.requestAccountSlot());
     }
 
@@ -56,8 +50,22 @@ public class UserConfigAccountLimitTest {
     public void slotIsAssignedBelowPremiumLimit() {
         activateAccounts(UserConfig.MAX_ACCOUNT_PREMIUM_COUNT - 1, true);
 
-        assertEquals(10, UserConfig.getMaxAccountCount());
+        assertEquals(20, UserConfig.getMaxAccountCount());
         assertEquals(UserConfig.MAX_ACCOUNT_PREMIUM_COUNT - 1, UserConfig.requestAccountSlot());
+    }
+
+    @Test
+    public void slotIsRejectedAtDefaultLimit() {
+        activateAccounts(UserConfig.MAX_ACCOUNT_DEFAULT_COUNT, false);
+
+        assertEquals(-1, UserConfig.requestAccountSlot());
+    }
+
+    @Test
+    public void slotIsRejectedAtPremiumLimit() {
+        activateAccounts(UserConfig.MAX_ACCOUNT_PREMIUM_COUNT, true);
+
+        assertEquals(-1, UserConfig.requestAccountSlot());
     }
 
     private void activateAccounts(int count, boolean premium) {
