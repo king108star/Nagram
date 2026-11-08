@@ -1,12 +1,12 @@
-name: Self Build 20 Accounts
+name: Self Build API 896686 Test
 
 on:
   workflow_dispatch:
     inputs:
       use_source_api:
-        description: Use the Telegram API settings already included in Nagram source
+        description: Test the API configuration verified in the original Nagram release
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -45,10 +45,14 @@ jobs:
           app_hash = properties.get('TELEGRAM_APP_HASH', '')
           if bool(app_id) != bool(app_hash):
               raise SystemExit('Provide both TELEGRAM_APP_ID and TELEGRAM_APP_HASH, or omit both.')
+          if app_id and app_id != '896686':
+              raise SystemExit('This test requires the verified API 896686 configuration; use signing-only LOCAL_PROPERTIES.')
+          if app_hash and app_hash != 'cfa1494541244ed94cbb742712b0dc37':
+              raise SystemExit('This test requires the matching verified API hash; use signing-only LOCAL_PROPERTIES.')
           if not app_id:
               if os.environ.get('USE_SOURCE_API', '').lower() != 'true':
                   raise SystemExit('Add your Telegram API credentials, or explicitly select the source API option when starting this workflow.')
-              print('Using the API settings already included in Nagram source. APK login has not been verified.')
+              print('Using the verified release API 896686 for a fresh isolated login test.')
           print('Build configuration is present.')
           PY
 
@@ -133,7 +137,7 @@ jobs:
           retention-days: 3
 
   build:
-    name: Build APK (arm64-v8a)
+    name: Build isolated API 896686 test APK
     needs: native
     runs-on: ubuntu-latest
     env:
@@ -169,6 +173,84 @@ jobs:
         with:
           name: native-arm64-v8a
           path: TMessagesProj/src/main/libs
+
+
+      - name: Prepare isolated API 896686 test app
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          import re
+          
+          ROOT = Path('.')
+          PACKAGE = 'com.king108star.accountapitest'
+          APP_NAME = 'Account API Test'
+          API_ID = '896686'
+          API_HASH = 'cfa1494541244ed94cbb742712b0dc37'
+          
+          def replace_once(text, old, new):
+              if text.count(old) != 1:
+                  raise SystemExit('Unexpected source structure: ' + old[:80])
+              return text.replace(old, new)
+          
+          gradle_path = ROOT / 'TMessagesProj/build.gradle'
+          gradle = gradle_path.read_text(encoding='utf-8')
+          gradle = replace_once(gradle, 'defaultConfig.applicationId = "xyz.nextalone.nagram"', f'defaultConfig.applicationId = "{PACKAGE}"')
+          gradle = replace_once(gradle, 'def appId = "11535358"', f'def appId = "{API_ID}"')
+          gradle = replace_once(gradle, 'def appHash = "33d372962fadb01df47e6ceed4e33cd6"', f'def appHash = "{API_HASH}"')
+          gradle = replace_once(gradle, 'versionName verName', 'versionName verName + "-api896686-test"')
+          gradle = replace_once(gradle, 'String gramName = "Nagram"', 'String gramName = "Account-API-Test"')
+          gradle_path.write_text(gradle, encoding='utf-8')
+          
+          # Separate Android storage, providers, launcher identity, and Firebase resource selection.
+          manifest_path = ROOT / 'TMessagesProj/src/main/AndroidManifest.xml'
+          manifest = manifest_path.read_text(encoding='utf-8')
+          assert '${applicationId}.provider' in manifest
+          manifest, icon_count = re.subn(r'android:(icon|roundIcon)="@[^"]+"', r'android:\1="@drawable/ic_account_api_test"', manifest)
+          if icon_count < 1:
+              raise SystemExit('No launcher icon references found')
+          manifest_path.write_text(manifest, encoding='utf-8')
+          icon = ROOT / 'TMessagesProj/src/main/res/drawable/ic_account_api_test.xml'
+          icon.parent.mkdir(parents=True, exist_ok=True)
+          icon.write_text('''<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+          <path android:fillColor="#186B55" android:pathData="M0,0h108v108h-108z"/>
+          <path android:fillColor="#FFFFFF" android:pathData="M22,24h8v60h-8zM22,24h25v8h-25zM22,50h25v8h-25zM39,24h8v60h-8zM57,24h29v8h-29zM67,24h9v60h-9z"/>
+          </vector>''', encoding='utf-8')
+          
+          labels = 0
+          for path in (ROOT / 'TMessagesProj/src/main/res').glob('values*/strings*.xml'):
+              text = path.read_text(encoding='utf-8')
+              text, count = re.subn(r'(<string\b[^>]*\bname="NekoX"[^>]*>).*?(</string>)', r'\g<1>' + APP_NAME + r'\g<2>', text, flags=re.S)
+              if count:
+                  path.write_text(text, encoding='utf-8')
+                  labels += count
+          if not labels:
+              raise SystemExit('Application label resource not found')
+          
+          firebase_path = ROOT / 'TMessagesProj/google-services.json'
+          firebase = json.loads(firebase_path.read_text(encoding='utf-8'))
+          matches = [client for client in firebase['client'] if client['client_info']['android_client_info']['package_name'] == 'xyz.nextalone.nagram']
+          if len(matches) != 1:
+              raise SystemExit('Expected exactly one original Firebase client')
+          test_client = json.loads(json.dumps(matches[0]))
+          test_client['client_info']['android_client_info']['package_name'] = PACKAGE
+          firebase['client'].append(test_client)
+          firebase_path.write_text(json.dumps(firebase, indent=2), encoding='utf-8')
+          
+          # Read the current server authorization's API ID instead of assuming build defaults.
+          session_path = ROOT / 'TMessagesProj/src/main/java/org/telegram/ui/SessionBottomSheet.java'
+          session = session_path.read_text(encoding='utf-8')
+          session = replace_once(session, 'stringBuilder.append(" ").append(session.app_version);', '''stringBuilder.append(" ").append(session.app_version);
+                  if (isCurrentSession) {
+                      stringBuilder.append("\\nSession API ID: ").append(session.api_id);
+                  }''')
+          session_path.write_text(session, encoding='utf-8')
+          
+          print('Test package:', PACKAGE)
+          print('Default API ID:', API_ID)
+          print('Fresh normal login required; current-session API ID is visible under Settings > Devices.')
+          print('This isolated test does not register a new Firebase application; background push is not part of the join test.')
+          PY
 
       - name: Set up Java 17
         uses: actions/setup-java@v6
@@ -217,10 +299,32 @@ jobs:
           ./gradlew TMessagesProj:testReleaseUnitTest --tests org.telegram.messenger.UserConfigAccountLimitTest --build-cache --no-configuration-cache
           ./gradlew TMessagesProj:assembleRelease --build-cache --no-configuration-cache
 
+
+      - name: Verify test package and generated API configuration
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          configs = list(Path('TMessagesProj/build/generated').rglob('BuildConfig.java'))
+          matched = [p for p in configs if 'package org.telegram.messenger;' in p.read_text() and 'APPLICATION_ID' in p.read_text()]
+          if len(matched) != 1:
+              raise SystemExit('Expected one release BuildConfig')
+          text = matched[0].read_text()
+          for pattern in (r'APP_ID\s*=\s*896686\s*;', r'APPLICATION_ID\s*=\s*"com.king108star.accountapitest"'):
+              if not re.search(pattern, text):
+                  raise SystemExit('Test BuildConfig verification failed')
+          print('Verified isolated package and API 896686 in generated BuildConfig.')
+          PY
+          APK=$(find TMessagesProj/build/outputs/apk -name '*.apk' -print -quit)
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" > test-apk-badging.txt
+          head -n 4 test-apk-badging.txt
+          grep -q "package: name='com.king108star.accountapitest'" test-apk-badging.txt
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$APK"
+
       - name: Upload APKs for download
         uses: actions/upload-artifact@v7
         with:
-          name: Nagram-self-20-APKs
+          name: Account-API896686-Test-arm64
           path: TMessagesProj/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 14
