@@ -6,7 +6,8 @@ Nagram is a third-party Telegram client based on [NekoX](https://web.archive.org
 - Channel: <https://t.me/nagram_channel>
 - Assets: <https://t.me/nagram_assets>
 - Releases: <https://github.com/NextAlone/Nagram/releases>
-- Issues here: <https://t.me/na_gram_reports/18>
+- Issues: <https://github.com/NextAlone/Nagram/issues>
+- Issues (Telegram): <https://t.me/na_gram_reports/18>
 
 ## Branding
 
@@ -108,6 +109,27 @@ Telegram API manuals: <https://core.telegram.org/api>
 
 MTProto protocol manuals: <https://core.telegram.org/mtproto>
 
+## Self builds with 20 accounts
+
+This fork allows up to 20 logged-in accounts and keeps 128 internal account slots.
+The `Self Build 20 Accounts` workflow builds a signed arm64-v8a APK with Java 17 and
+Android API 36. The account-limit tests use Robolectric API 35.
+
+Set these repository Actions secrets:
+
+- `KEYSTORE_BASE64`: single-line Base64 of your existing `release.keystore`.
+- `LOCAL_PROPERTIES`: single-line Base64 of properties containing `KEYSTORE_PASS`,
+  `ALIAS_NAME`, `ALIAS_PASS`, `TELEGRAM_APP_ID` and `TELEGRAM_APP_HASH`.
+
+Use your own Telegram API ID and its matching hash. Keep the existing signing key
+and its three signing properties when updating an installed self build.
+
+Run **Actions → Self Build 20 Accounts → Run workflow** and download
+`Nagram-self-20-APKs` when it succeeds. Pull requests and main-branch release builds
+reuse this workflow, including the account tests and APK verification. Gradle
+compiles the native code; the old separate native-library job is no longer used.
+Builds stay in GitHub artifacts; this fork's workflows do not publish to Telegram.
+
 ## Compilation Guide
 
 **NOTE: For Windows users, please consider using a Linux VM (such as WSL2) or dual booting.**
@@ -116,17 +138,11 @@ Environment:
 
 - Linux distribution based on Debian or Arch Linux, or macOS
 
-- Native tools: `gcc` `go` `make` `cmake` `ninja` `yasm`
-  
-  ```shell
-  # for Debian based distribution
-  sudo apt install gcc golang make cmake ninja-build yasm
-  # for Arch Linux based distribution
-  sudo pacman -S base-devel go ninja cmake yasm
-  # for macOS
-  xcode-select --install # install developer tools (will open confirm dialog)
-  brew install go cmake ninja yasm # install other tools by homebrew
-  ```
+- Optional: `ccache` in `PATH` speeds up rebuilding the native code.
+
+  The third-party native libraries (FFmpeg, BoringSSL, libvpx, ...) are committed prebuilt under
+  **TMessagesProj/jni/prebuild/lib**; the `build_*.sh` scripts there, and the tools they need
+  (`go`, `yasm`, `make`, ...), are only for regenerating them.
 - Android SDK: `build-tools;33.0.0` `platforms;android-33` `ndk;27.2.12479018` `cmake;3.18.1` `cmake;3.22.1` (the default location is **$HOME/Android/SDK**, otherwise you need to specify **$ANDROID_HOME** for it)
 
   It is recommended to use [Android Studio](https://developer.android.com/studio) to install, but you can also use `sdkmanager` command on distributions based on Debian:
@@ -144,6 +160,9 @@ Build:
    git submodule update --init --recursive
    ```
 
+   The build applies **TMessagesProj/jni/patches** to `tgcalls` itself. When an update moves the `tgcalls`
+   submodule, add `--force` so the patched files are reset before the new commit is checked out.
+
 2. Disable signature check by removing the following lines in **TMessagesProj/jni/jni.c**:
    ```c
     if (verifySign(env) != JNI_OK) {
@@ -151,19 +170,13 @@ Build:
     }
    ```
 
-3. Build external libraries and native code: 
-   ```shell
-   ./run init libs
-   ./run libs native
-   ```
+3. Fill out `TELEGRAM_APP_ID` and `TELEGRAM_APP_HASH` in **local.properties** (from [Telegram Developer](https://my.telegram.org/auth))
 
-4. Fill out `TELEGRAM_APP_ID` and `TELEGRAM_APP_HASH` in **local.properties** (from [Telegram Developer](https://my.telegram.org/auth))
+4. Replace **TMessagesProj/google-services.json** if you want FCM to work.
 
-5. Replace **TMessagesProj/google-services.json** if you want FCM to work.
+5. Replace **release.keystore** with yours and fill out `ALIAS_NAME`, `KEYSTORE_PASS` and `ALIAS_PASS` in **local.properties**.
 
-6. Replace **release.keystore** with yours and fill out `ALIAS_NAME`, `KEYSTORE_PASS` and `ALIAS_PASS` in **local.properties**.
-
-7. Build with Gradle:
+6. Build with Gradle (the native code is compiled as part of the build):
 
    ```shell
    ./gradlew assemble<Release/Debug>

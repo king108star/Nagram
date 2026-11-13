@@ -2,11 +2,12 @@ name: Self Build 20 Accounts
 
 on:
   workflow_dispatch:
-    inputs:
-      use_source_api:
-        description: Use the Telegram API settings already included in Nagram source
-        type: boolean
-        default: false
+  workflow_call:
+    secrets:
+      LOCAL_PROPERTIES:
+        required: true
+      KEYSTORE_BASE64:
+        required: true
 
 permissions:
   contents: read
@@ -20,11 +21,11 @@ jobs:
         env:
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          USE_SOURCE_API: ${{ inputs.use_source_api }}
         run: |
           python3 - <<'PY'
           import base64
           import os
+          import re
           for name in ('LOCAL_PROPERTIES', 'KEYSTORE_BASE64'):
               value = os.environ.get(name, '').strip()
               if not value:
@@ -38,31 +39,33 @@ jobs:
           text = base64.b64decode(os.environ['LOCAL_PROPERTIES'].strip()).decode('utf-8')
           properties = dict(line.split('=', 1) for line in text.splitlines() if '=' in line and not line.lstrip().startswith('#'))
           properties = {key.strip(): value.strip() for key, value in properties.items()}
-          for key in ('KEYSTORE_PASS', 'ALIAS_NAME', 'ALIAS_PASS'):
+          for key in ('KEYSTORE_PASS', 'ALIAS_NAME', 'ALIAS_PASS', 'TELEGRAM_APP_ID', 'TELEGRAM_APP_HASH'):
               if not properties.get(key):
                   raise SystemExit(f'LOCAL_PROPERTIES is missing: {key}')
-          app_id = properties.get('TELEGRAM_APP_ID', '')
-          app_hash = properties.get('TELEGRAM_APP_HASH', '')
-          if bool(app_id) != bool(app_hash):
-              raise SystemExit('Provide both TELEGRAM_APP_ID and TELEGRAM_APP_HASH, or omit both.')
-          if not app_id:
-              if os.environ.get('USE_SOURCE_API', '').lower() != 'true':
-                  raise SystemExit('Add your Telegram API credentials, or explicitly select the source API option when starting this workflow.')
-              print('Using the API settings already included in Nagram source. APK login has not been verified.')
-          print('Build configuration is present.')
+          app_id = properties['TELEGRAM_APP_ID']
+          if not re.fullmatch(r'[1-9][0-9]*', app_id) or int(app_id) > 2147483647:
+              raise SystemExit('TELEGRAM_APP_ID must be a positive 32-bit integer.')
+          if not re.fullmatch(r'[0-9a-fA-F]{32}', properties['TELEGRAM_APP_HASH']):
+              raise SystemExit('TELEGRAM_APP_HASH must be the matching 32-character hexadecimal hash.')
+          print('Personal Telegram API and signing configuration are present.')
           PY
 
-  native:
-    name: Native build (${{ matrix.abi }})
+  build:
+    name: Build APK (arm64-v8a)
     needs: validate
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        abi: [arm64-v8a]
+    timeout-minutes: 120
+    env:
+      NATIVE_TARGET: arm64-v8a
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "5G"
+      CCACHE_HARDLINK: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Prepare native code for own signing key
         run: |
@@ -78,74 +81,6 @@ jobs:
               raise SystemExit('Expected upstream signature check not found; review the current jni.c.')
           path.write_text(text)
           PY
-          sed -i 's/\/\///g' settings.gradle
-
-      - name: Native cache
-        id: native-cache
-        uses: actions/cache@v6
-        with:
-          path: TMessagesProj/src/main/libs
-          key: self20-native-v1-${{ matrix.abi }}-${{ hashFiles('TMessagesProj/jni/**', 'bin/**', 'build.gradle', 'TMessagesProj/build.gradle', 'gradle/wrapper/**', '.gitmodules') }}
-
-      - name: Initialize submodules
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        run: git submodule update --init --recursive
-
-      - name: Set up Java 17
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Android SDK
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        uses: android-actions/setup-android@v4
-        with:
-          packages: platform-tools
-
-      - name: Install Android build tools
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        run: |
-          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
-          printf 'sdk.dir=%s\nndk.dir=%s/ndk/27.2.12479018\n' "$ANDROID_HOME" "$ANDROID_HOME" > local.properties
-
-      - name: Compile native libraries
-        if: steps.native-cache.outputs.cache-hit != 'true'
-        env:
-          NATIVE_TARGET: ${{ matrix.abi }}
-        run: |
-          ./run init libs
-          ./run libs native
-
-      - name: Check native output
-        env:
-          NATIVE_TARGET: ${{ matrix.abi }}
-        run: |
-          test -n "$(find "TMessagesProj/src/main/libs/$NATIVE_TARGET" -name 'libtmessages*.so' -size +0c -print -quit)"
-
-      - name: Upload native libraries
-        uses: actions/upload-artifact@v7
-        with:
-          name: native-${{ matrix.abi }}
-          path: TMessagesProj/src/main/libs
-          if-no-files-found: error
-          retention-days: 3
-
-  build:
-    name: Build APK (arm64-v8a)
-    needs: native
-    runs-on: ubuntu-latest
-    env:
-      NATIVE_TARGET: arm64-v8a
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Initialize submodules
-        run: |
-          sed -i 's/\/\///g' settings.gradle
-          git submodule update --init --recursive
 
       - name: Verify 20-account source configuration
         run: |
@@ -164,12 +99,6 @@ jobs:
           print('Login limit: 20. Internal account slots remain 128.')
           PY
 
-      - name: Download native libraries
-        uses: actions/download-artifact@v8
-        with:
-          name: native-arm64-v8a
-          path: TMessagesProj/src/main/libs
-
       - name: Set up Java 17
         uses: actions/setup-java@v6
         with:
@@ -185,6 +114,13 @@ jobs:
         run: |
           sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
           printf 'sdk.dir=%s\nndk.dir=%s/ndk/27.2.12479018\n' "$ANDROID_HOME" "$ANDROID_HOME" > local.properties
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          append-timestamp: false
+          key: self20-gradle-native-arm64-v2
+          max-size: 5G
 
       - name: Restore own signing key
         env:
@@ -202,25 +138,82 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
           import time
           path = Path('gradle.properties')
-          path.write_text(path.read_text().replace('2000000000000', str(time.time_ns() // 1_000_000)))
+          text, count = re.subn(r'(?m)^APP_BUILD_TIMESTAMP=.*$', 'APP_BUILD_TIMESTAMP=' + str(time.time_ns() // 1_000_000), path.read_text())
+          if count != 1:
+              raise SystemExit('Expected exactly one APP_BUILD_TIMESTAMP property.')
+          path.write_text(text)
           PY
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Compile signed release APKs
+      - name: Test 20-account limits
+        env:
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+        run: ./gradlew TMessagesProj:testReleaseUnitTest --tests org.telegram.messenger.UserConfigAccountLimitTest --build-cache --no-configuration-cache
+
+      - name: Compile signed release APK
+        env:
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+        run: ./gradlew TMessagesProj:assembleRelease --build-cache --no-configuration-cache
+
+      - name: Verify APK and personal API configuration
         env:
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
         run: |
-          ./gradlew TMessagesProj:testReleaseUnitTest --tests org.telegram.messenger.UserConfigAccountLimitTest --build-cache --no-configuration-cache
-          ./gradlew TMessagesProj:assembleRelease --build-cache --no-configuration-cache
+          python3 - <<'PY'
+          import base64
+          import os
+          import re
+          import subprocess
+          import zipfile
+          from pathlib import Path
+          text = base64.b64decode(os.environ['LOCAL_PROPERTIES'].strip()).decode('utf-8')
+          properties = dict(line.split('=', 1) for line in text.splitlines() if '=' in line and not line.lstrip().startswith('#'))
+          properties = {key.strip(): value.strip() for key, value in properties.items()}
+          configs = list(Path('TMessagesProj/build/generated/source/buildConfig/release').rglob('BuildConfig.java'))
+          if len(configs) != 1:
+              raise SystemExit('Expected exactly one release BuildConfig.java.')
+          generated = configs[0].read_text()
+          app_id = re.search(r'\bAPP_ID\s*=\s*([0-9]+);', generated)
+          app_hash = re.search(r'\bAPP_HASH\s*=\s*"([0-9a-fA-F]+)";', generated)
+          if not app_id or not app_hash or app_id.group(1) != properties['TELEGRAM_APP_ID'] or app_hash.group(1) != properties['TELEGRAM_APP_HASH']:
+              raise SystemExit('The release does not contain the configured personal Telegram API pair.')
+          apks = list(Path('TMessagesProj/build/outputs/apk/release').glob('*.apk'))
+          if len(apks) != 1:
+              raise SystemExit('Expected exactly one signed arm64 release APK.')
+          apk = apks[0]
+          tools = Path(os.environ['ANDROID_HOME']) / 'build-tools/36.0.0'
+          signing = subprocess.check_output([str(tools / 'apksigner'), 'verify', '--print-certs', str(apk)], text=True)
+          certificate = re.search(r'Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F]+)', signing)
+          if not certificate or certificate.group(1).lower() != 'f2397ec049b8df92128ed0497527946e59ce98a27ae747d455e83b8ad96bdc00':
+              raise SystemExit('The APK signing certificate differs from the existing self-build key.')
+          badging = subprocess.check_output([str(tools / 'aapt'), 'dump', 'badging', str(apk)], text=True)
+          if "name='xyz.nextalone.nagram'" not in badging or "versionName='13.1.1'" not in badging or "versionCode='1258'" not in badging:
+              raise SystemExit('Unexpected application identity or release version.')
+          with zipfile.ZipFile(apk) as archive:
+              abis = {name.split('/')[1] for name in archive.namelist() if name.startswith('lib/') and name.endswith('.so')}
+              if abis != {'arm64-v8a'} or 'lib/arm64-v8a/libtmessages.49.so' not in archive.namelist():
+                  raise SystemExit('The APK must contain the arm64 native library only.')
+          print('Personal API pair, APK signature, application ID, version and arm64 native library verified.')
+          PY
 
-      - name: Upload APKs for download
+      - name: Upload account test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Nagram-self-20-account-tests
+          path: TMessagesProj/build/test-results/testReleaseUnitTest/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload APK for download
         uses: actions/upload-artifact@v7
         with:
           name: Nagram-self-20-APKs
-          path: TMessagesProj/build/outputs/apk/**/*.apk
+          path: TMessagesProj/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 14
