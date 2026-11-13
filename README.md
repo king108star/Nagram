@@ -109,6 +109,27 @@ Telegram API manuals: <https://core.telegram.org/api>
 
 MTProto protocol manuals: <https://core.telegram.org/mtproto>
 
+## Self builds with 20 accounts
+
+This fork allows up to 20 logged-in accounts and keeps 128 internal account slots.
+The `Self Build 20 Accounts` workflow builds a signed arm64-v8a APK with Java 17 and
+Android API 36. The account-limit tests use Robolectric API 35.
+
+Set these repository Actions secrets:
+
+- `KEYSTORE_BASE64`: single-line Base64 of your existing `release.keystore`.
+- `LOCAL_PROPERTIES`: single-line Base64 of properties containing `KEYSTORE_PASS`,
+  `ALIAS_NAME`, `ALIAS_PASS`, `TELEGRAM_APP_ID` and `TELEGRAM_APP_HASH`.
+
+Use your own Telegram API ID and its matching hash. Keep the existing signing key
+and its three signing properties when updating an installed self build.
+
+Run **Actions → Self Build 20 Accounts → Run workflow** and download
+`Nagram-self-20-APKs` when it succeeds. Pull requests and main-branch release builds
+reuse this workflow, including the account tests and APK verification. Gradle
+compiles the native code; the old separate native-library job is no longer used.
+Builds stay in GitHub artifacts; this fork's workflows do not publish to Telegram.
+
 ## Compilation Guide
 
 **NOTE: For Windows users, please consider using a Linux VM (such as WSL2) or dual booting.**
