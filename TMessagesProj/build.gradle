@@ -175,7 +175,7 @@ android {
     }
 
     defaultConfig {
-        minSdkVersion 23
+        minSdkVersion 24
         //noinspection ExpiredTargetSdkVersion,OldTargetApi
         targetSdkVersion 36
 
@@ -198,6 +198,12 @@ android {
         buildConfigField "int", "OFFICIAL_VERSION_CODE", officialCode + ""
         buildConfigField "int", "APP_ID", appId
         buildConfigField "String", "APP_HASH", "\"" + appHash + "\""
+
+        ndk {
+            if (!nativeTarget.isBlank()) {
+                abiFilters nativeTarget
+            }
+        }
 
         externalNativeBuild {
             cmake {
