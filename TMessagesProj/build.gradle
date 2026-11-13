@@ -199,12 +199,6 @@ android {
         buildConfigField "int", "APP_ID", appId
         buildConfigField "String", "APP_HASH", "\"" + appHash + "\""
 
-        ndk {
-            if (!nativeTarget.isBlank()) {
-                abiFilters nativeTarget
-            }
-        }
-
         externalNativeBuild {
             cmake {
                 version '3.22.1'
