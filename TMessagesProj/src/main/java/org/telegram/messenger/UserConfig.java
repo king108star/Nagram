@@ -25,13 +25,12 @@ import java.util.Collections;
 import java.util.List;
 
 import tw.nekomimi.nekogram.NekoConfig;
-import tw.nekomimi.nekogram.helpers.remote.ExtendedHelper;
 
 public class UserConfig extends BaseController {
 
     public static int selectedAccount;
-    public final static int MAX_ACCOUNT_DEFAULT_COUNT = 8;
-    public final static int MAX_ACCOUNT_PREMIUM_COUNT = 10;
+    public final static int MAX_ACCOUNT_DEFAULT_COUNT = 20;
+    public final static int MAX_ACCOUNT_PREMIUM_COUNT = 20;
     public final static int MAX_ACCOUNT_COUNT = 128;
 
     private final Object sync = new Object();
@@ -173,9 +172,6 @@ public class UserConfig extends BaseController {
         }
 
         if (getActivatedAccountsCount() < getMaxAccountCount()) {
-            return availableAccount;
-        }
-        if (ExtendedHelper.getInstance().hasExtended()) {
             return availableAccount;
         }
         return -1;
