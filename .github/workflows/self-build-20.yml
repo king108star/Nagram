@@ -1,0 +1,219 @@
+name: Self Build 20 Accounts
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      LOCAL_PROPERTIES:
+        required: true
+      KEYSTORE_BASE64:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Check build configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required secrets
+        env:
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          import re
+          for name in ('LOCAL_PROPERTIES', 'KEYSTORE_BASE64'):
+              value = os.environ.get(name, '').strip()
+              if not value:
+                  raise SystemExit(f'Add the Actions secret: {name}')
+              try:
+                  decoded = base64.b64decode(value, validate=True)
+              except Exception:
+                  raise SystemExit(f'{name} must contain single-line base64')
+              if not decoded:
+                  raise SystemExit(f'{name} is empty')
+          text = base64.b64decode(os.environ['LOCAL_PROPERTIES'].strip()).decode('utf-8')
+          properties = dict(line.split('=', 1) for line in text.splitlines() if '=' in line and not line.lstrip().startswith('#'))
+          properties = {key.strip(): value.strip() for key, value in properties.items()}
+          for key in ('KEYSTORE_PASS', 'ALIAS_NAME', 'ALIAS_PASS', 'TELEGRAM_APP_ID', 'TELEGRAM_APP_HASH'):
+              if not properties.get(key):
+                  raise SystemExit(f'LOCAL_PROPERTIES is missing: {key}')
+          app_id = properties['TELEGRAM_APP_ID']
+          if not re.fullmatch(r'[1-9][0-9]*', app_id) or int(app_id) > 2147483647:
+              raise SystemExit('TELEGRAM_APP_ID must be a positive 32-bit integer.')
+          if not re.fullmatch(r'[0-9a-fA-F]{32}', properties['TELEGRAM_APP_HASH']):
+              raise SystemExit('TELEGRAM_APP_HASH must be the matching 32-character hexadecimal hash.')
+          print('Personal Telegram API and signing configuration are present.')
+          PY
+
+  build:
+    name: Build APK (arm64-v8a)
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      NATIVE_TARGET: arm64-v8a
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "5G"
+      CCACHE_HARDLINK: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Prepare native code for own signing key
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path('TMessagesProj/jni/jni.c')
+          text = path.read_text()
+          # The upstream README requires removing its signing check for self builds.
+          pattern = r'\s*if\s*\(verifySign\(env\)\s*!=\s*JNI_OK\)\s*\{\s*return\s+JNI_ERR;\s*\}'
+          text, count = re.subn(pattern, '\n    /* Self build: APK uses the owner\'s signing key. */\n', text)
+          if count != 1:
+              raise SystemExit('Expected upstream signature check not found; review the current jni.c.')
+          path.write_text(text)
+          PY
+
+      - name: Verify 20-account source configuration
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path('TMessagesProj/src/main/java/org/telegram/messenger/UserConfig.java')
+          text = path.read_text()
+          for name in ('MAX_ACCOUNT_DEFAULT_COUNT', 'MAX_ACCOUNT_PREMIUM_COUNT'):
+              if not re.search(r'\b' + name + r'\s*=\s*20\s*;', text):
+                  raise SystemExit(f'{name} must be 20 in UserConfig.java.')
+          if not re.search(r'\bMAX_ACCOUNT_COUNT\s*=\s*128\s*;', text):
+              raise SystemExit('Keep internal account slots at 128.')
+          if 'ExtendedHelper.getInstance().hasExtended()' in text:
+              raise SystemExit('Remove the extra account-slot bypass from requestAccountSlot().')
+          print('Login limit: 20. Internal account slots remain 128.')
+          PY
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android build tools
+        run: |
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          printf 'sdk.dir=%s\nndk.dir=%s/ndk/27.2.12479018\n' "$ANDROID_HOME" "$ANDROID_HOME" > local.properties
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          append-timestamp: false
+          key: self20-gradle-native-arm64-v2
+          max-size: 5G
+
+      - name: Restore own signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          umask 077
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+          Path('TMessagesProj/release.keystore').write_bytes(base64.b64decode(os.environ['KEYSTORE_BASE64'].strip(), validate=True))
+          PY
+
+      - name: Set build timestamp
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import time
+          path = Path('gradle.properties')
+          text, count = re.subn(r'(?m)^APP_BUILD_TIMESTAMP=.*$', 'APP_BUILD_TIMESTAMP=' + str(time.time_ns() // 1_000_000), path.read_text())
+          if count != 1:
+              raise SystemExit('Expected exactly one APP_BUILD_TIMESTAMP property.')
+          path.write_text(text)
+          PY
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Test 20-account limits
+        env:
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+        run: ./gradlew TMessagesProj:testReleaseUnitTest --tests org.telegram.messenger.UserConfigAccountLimitTest --build-cache --no-configuration-cache
+
+      - name: Compile signed release APK
+        env:
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+        run: ./gradlew TMessagesProj:assembleRelease --build-cache --no-configuration-cache
+
+      - name: Verify APK and personal API configuration
+        env:
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          import re
+          import subprocess
+          import zipfile
+          from pathlib import Path
+          text = base64.b64decode(os.environ['LOCAL_PROPERTIES'].strip()).decode('utf-8')
+          properties = dict(line.split('=', 1) for line in text.splitlines() if '=' in line and not line.lstrip().startswith('#'))
+          properties = {key.strip(): value.strip() for key, value in properties.items()}
+          configs = list(Path('TMessagesProj/build/generated/source/buildConfig/release').rglob('BuildConfig.java'))
+          if len(configs) != 1:
+              raise SystemExit('Expected exactly one release BuildConfig.java.')
+          generated = configs[0].read_text()
+          app_id = re.search(r'\bAPP_ID\s*=\s*([0-9]+);', generated)
+          app_hash = re.search(r'\bAPP_HASH\s*=\s*"([0-9a-fA-F]+)";', generated)
+          if not app_id or not app_hash or app_id.group(1) != properties['TELEGRAM_APP_ID'] or app_hash.group(1) != properties['TELEGRAM_APP_HASH']:
+              raise SystemExit('The release does not contain the configured personal Telegram API pair.')
+          apks = list(Path('TMessagesProj/build/outputs/apk/release').glob('*.apk'))
+          if len(apks) != 1:
+              raise SystemExit('Expected exactly one signed arm64 release APK.')
+          apk = apks[0]
+          tools = Path(os.environ['ANDROID_HOME']) / 'build-tools/36.0.0'
+          signing = subprocess.check_output([str(tools / 'apksigner'), 'verify', '--print-certs', str(apk)], text=True)
+          certificate = re.search(r'Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F]+)', signing)
+          if not certificate or certificate.group(1).lower() != 'f2397ec049b8df92128ed0497527946e59ce98a27ae747d455e83b8ad96bdc00':
+              raise SystemExit('The APK signing certificate differs from the existing self-build key.')
+          badging = subprocess.check_output([str(tools / 'aapt'), 'dump', 'badging', str(apk)], text=True)
+          if "name='xyz.nextalone.nagram'" not in badging or "versionName='13.1.1'" not in badging or "versionCode='1258'" not in badging:
+              raise SystemExit('Unexpected application identity or release version.')
+          with zipfile.ZipFile(apk) as archive:
+              abis = {name.split('/')[1] for name in archive.namelist() if name.startswith('lib/') and name.endswith('.so')}
+              if abis != {'arm64-v8a'} or 'lib/arm64-v8a/libtmessages.49.so' not in archive.namelist():
+                  raise SystemExit('The APK must contain the arm64 native library only.')
+          print('Personal API pair, APK signature, application ID, version and arm64 native library verified.')
+          PY
+
+      - name: Upload account test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Nagram-self-20-account-tests
+          path: TMessagesProj/build/test-results/testReleaseUnitTest/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload APK for download
+        uses: actions/upload-artifact@v7
+        with:
+          name: Nagram-self-20-APKs
+          path: TMessagesProj/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
